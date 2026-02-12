@@ -166,7 +166,6 @@ JSONのみを出力してください（説明文などは不要です）。`;
 	});
 
 	try {
-		logger.debug("Calling Vertex AI Gemini API...");
 		const result = await model.generateContent(prompt);
 		logger.debug("Vertex AI Gemini API call completed");
 
