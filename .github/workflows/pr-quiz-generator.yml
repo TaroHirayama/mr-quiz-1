@@ -1,0 +1,177 @@
+# PR Quiz Generator
+# PR作成時にトリガーし、Workload Identity Federationで認証してCloud Runを呼び出し、
+# GitHub App認証でクイズをPRコメントとして投稿
+
+name: PR Quiz Generator
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write  # Workload Identity Federationに必要
+
+jobs:
+  generate-quiz:
+    name: Generate Quiz via Cloud Run
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          token_format: 'id_token'
+          id_token_audience: ${{ secrets.CLOUD_RUN_URL }}
+          id_token_include_email: true
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          # PRのベースブランチとの差分を取得
+          git fetch origin ${{ github.base_ref }}
+          DIFF=$(git diff origin/${{ github.base_ref }}...HEAD)
+
+          # 差分をファイルに保存（JSONエスケープのため）
+          echo "$DIFF" > /tmp/diff.txt
+
+          # 差分の行数をチェック
+          DIFF_LINES=$(echo "$DIFF" | wc -l)
+          echo "diff_lines=$DIFF_LINES" >> $GITHUB_OUTPUT
+
+          if [ "$DIFF_LINES" -lt 5 ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get changed files
+        id: files
+        run: |
+          FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "files=$FILES" >> $GITHUB_OUTPUT
+
+      - name: Generate GitHub App Token
+        if: steps.diff.outputs.skip == 'false'
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+
+      - name: Skip if diff is too small
+        if: steps.diff.outputs.skip == 'true'
+        run: echo "Diff is too small, skipping quiz generation"
+
+      - name: Generate quiz with IAM authentication
+        if: steps.diff.outputs.skip == 'false'
+        id: quiz
+        env:
+          CLOUD_RUN_URL: ${{ secrets.CLOUD_RUN_URL }}
+          ID_TOKEN: ${{ steps.auth.outputs.id_token }}
+          FILES_CHANGED: ${{ steps.files.outputs.files }}
+        run: |
+          # diffをJSON形式で準備
+          DIFF_CONTENT=$(cat /tmp/diff.txt | jq -Rs .)
+
+          # IAM認証付きでAPIリクエストを送信
+          RESPONSE=$(curl -s -X POST "$CLOUD_RUN_URL/api/quiz/generate" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $ID_TOKEN" \
+            -d "{
+              \"platform\": \"github\",
+              \"owner\": \"${{ github.repository_owner }}\",
+              \"repo\": \"${{ github.event.repository.name }}\",
+              \"number\": ${{ github.event.pull_request.number }},
+              \"accountId\": \"${{ github.event.pull_request.user.login }}\",
+              \"title\": $(echo '${{ github.event.pull_request.title }}' | jq -Rs .),
+              \"diff\": $DIFF_CONTENT,
+              \"filesChanged\": $FILES_CHANGED
+            }")
+
+          echo "response=$RESPONSE" >> $GITHUB_OUTPUT
+
+          # レスポンスからクイズ情報を抽出
+          QUIZ_ID=$(echo "$RESPONSE" | jq -r '.quizId')
+          QUESTION=$(echo "$RESPONSE" | jq -r '.questionText')
+          CATEGORY=$(echo "$RESPONSE" | jq -r '.category')
+          DIFFICULTY=$(echo "$RESPONSE" | jq -r '.difficulty')
+          OPTIONS=$(echo "$RESPONSE" | jq -r '.options | to_entries | map("- **\(.key + 1).** \(.value)") | join("\n")')
+
+          echo "quiz_id=$QUIZ_ID" >> $GITHUB_OUTPUT
+          echo "question<<EOF" >> $GITHUB_OUTPUT
+          echo "$QUESTION" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "category=$CATEGORY" >> $GITHUB_OUTPUT
+          echo "difficulty=$DIFFICULTY" >> $GITHUB_OUTPUT
+          echo "options<<EOF" >> $GITHUB_OUTPUT
+          echo "$OPTIONS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Post quiz as comment
+        if: steps.diff.outputs.skip == 'false' && steps.quiz.outputs.quiz_id != '' && steps.quiz.outputs.quiz_id != 'null'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const quizId = '${{ steps.quiz.outputs.quiz_id }}';
+            const question = `${{ steps.quiz.outputs.question }}`;
+            const category = '${{ steps.quiz.outputs.category }}';
+            const difficulty = '${{ steps.quiz.outputs.difficulty }}';
+            const options = `${{ steps.quiz.outputs.options }}`;
+
+            const difficultyEmoji = {
+              'easy': '🟢',
+              'medium': '🟡',
+              'hard': '🔴'
+            };
+
+            const categoryLabel = {
+              'bug_fix': '🐛 Bug Fix',
+              'performance': '⚡ Performance',
+              'refactoring': '🔧 Refactoring',
+              'security': '🔒 Security',
+              'logic': '💡 Logic'
+            };
+
+            const body = `## 🎯 PR Quiz Time!
+
+            **Category:** ${categoryLabel[category] || category}
+            **Difficulty:** ${difficultyEmoji[difficulty] || ''} ${difficulty}
+
+            ### Question
+            ${question}
+
+            ### Options
+            ${options}
+
+            ---
+
+            <details>
+            <summary>📝 How to answer</summary>
+
+            Reply to this comment with your answer number (1-4).
+
+            Example: \`1\`
+
+            Quiz ID: \`${quizId}\`
+            </details>
+
+            ---
+            *🤖 Generated by MR/PR Quiz Bot (IAM Auth)*`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });

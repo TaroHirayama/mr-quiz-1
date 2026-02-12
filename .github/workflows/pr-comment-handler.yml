@@ -1,0 +1,99 @@
+# PR Comment Handler
+# PRコメントでのコマンド処理（/answer, /profile）
+# Installation IDをCloud Runに送信し、Cloud RunがGitHub App認証でコメント投稿
+
+name: PR Comment Handler
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write  # Workload Identity Federationに必要
+
+jobs:
+  process-comment:
+    name: Process PR Comment Command
+    runs-on: ubuntu-latest
+
+    # PRコメントのみ処理（issueコメントとBotのコメントは無視）
+    if: github.event.issue.pull_request != null && github.event.comment.user.login != 'github-actions[bot]'
+
+    steps:
+      - name: Check for command
+        id: command
+        run: |
+          COMMENT_BODY='${{ github.event.comment.body }}'
+          echo "comment_body=$COMMENT_BODY" >> $GITHUB_OUTPUT
+
+          # /answer または /profile コマンドが含まれているか確認
+          if echo "$COMMENT_BODY" | grep -qE '^/answer|^/profile'; then
+            echo "has_command=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_command=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Skip if no command
+        if: steps.command.outputs.has_command == 'false'
+        run: echo "No command detected in comment, skipping"
+
+      - name: Authenticate to Google Cloud
+        if: steps.command.outputs.has_command == 'true'
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          token_format: 'id_token'
+          id_token_audience: ${{ secrets.CLOUD_RUN_URL }}
+          id_token_include_email: true
+
+      - name: Generate GitHub App Token and get Installation ID
+        if: steps.command.outputs.has_command == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+
+      - name: Process comment command
+        if: steps.command.outputs.has_command == 'true'
+        env:
+          CLOUD_RUN_URL: ${{ secrets.CLOUD_RUN_URL }}
+          ID_TOKEN: ${{ steps.auth.outputs.id_token }}
+        run: |
+          # コメント本文をJSON形式で準備
+          COMMENT_BODY=$(echo '${{ github.event.comment.body }}' | jq -Rs .)
+
+          # IAM認証付きでAPIリクエストを送信
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$CLOUD_RUN_URL/api/comment/process" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $ID_TOKEN" \
+            -d "{
+              \"owner\": \"${{ github.repository_owner }}\",
+              \"repo\": \"${{ github.event.repository.name }}\",
+              \"prNumber\": ${{ github.event.issue.number }},
+              \"accountId\": \"${{ github.event.comment.user.login }}\",
+              \"commentBody\": $COMMENT_BODY,
+              \"installationId\": ${{ steps.app-token.outputs.installation-id }}
+            }")
+
+          # レスポンスとステータスコードを分離
+          HTTP_BODY=$(echo "$RESPONSE" | head -n -1)
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n 1)
+
+          echo "Response status: $HTTP_CODE"
+          echo "Response body: $HTTP_BODY"
+
+          # エラーチェック
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            echo "Error: API request failed with status $HTTP_CODE"
+            echo "$HTTP_BODY"
+            exit 1
+          fi
+
+          # 成功メッセージ
+          COMMAND_TYPE=$(echo "$HTTP_BODY" | jq -r '.commandType // "unknown"')
+          echo "Command processed successfully: $COMMAND_TYPE"

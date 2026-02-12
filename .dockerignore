@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Source control
+.git/
+.gitignore
+
+# Build artifacts
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Documentation
+*.md
+docs/
+specs/
+
+# Test files
+coverage/
+*.test.ts
+*.spec.ts
+
+# Firebase
+.firebase/
+firebase-debug.log
+
+# Development
+Dockerfile*
+docker-compose*.yml
+.dockerignore

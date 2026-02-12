@@ -1,0 +1,42 @@
+{
+  "name": "mr-quiz-bot",
+  "version": "0.1.0",
+  "description": "PR/MR作成時にAIがクイズを自動生成するBot",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "emulator": "firebase emulators:start --only firestore",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src",
+    "lint:fix": "biome check --write src",
+    "format": "biome format --write src",
+    "test": "vitest",
+    "test:run": "vitest run"
+  },
+  "dependencies": {
+    "@google-cloud/firestore": "^8.2.0",
+    "@google-cloud/vertexai": "^1.10.0",
+    "@hono/node-server": "^1.19.9",
+    "@octokit/app": "^16.1.2",
+    "@octokit/rest": "^22.0.1",
+    "dotenv": "^17.2.3",
+    "hono": "^4.11.4",
+    "hono-rate-limiter": "^0.5.3",
+    "uuid": "^13.0.0",
+    "zod": "^4.3.5"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.11",
+    "@types/node": "^22.15.0",
+    "firebase-tools": "^15.3.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.17"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
