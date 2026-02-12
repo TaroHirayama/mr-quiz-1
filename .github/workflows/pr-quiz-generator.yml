@@ -7,6 +7,7 @@ name: PR Quiz Generator
 on:
   pull_request:
     types: [opened, synchronize]
+    branches: [main]
 
 permissions:
   contents: read
@@ -36,10 +37,12 @@ jobs:
 
       - name: Get PR diff
         id: diff
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
           # PRのベースブランチとの差分を取得
-          git fetch origin ${{ github.base_ref }}
-          DIFF=$(git diff origin/${{ github.base_ref }}...HEAD)
+          git fetch origin "$BASE_REF"
+          DIFF=$(git diff "origin/$BASE_REF...HEAD")
 
           # 差分をファイルに保存（JSONエスケープのため）
           echo "$DIFF" > /tmp/diff.txt
@@ -56,8 +59,10 @@ jobs:
 
       - name: Get changed files
         id: files
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          FILES=$(git diff --name-only "origin/$BASE_REF...HEAD" | jq -R -s -c 'split("\n") | map(select(length > 0))')
           echo "files=$FILES" >> $GITHUB_OUTPUT
 
       - name: Generate GitHub App Token
@@ -79,24 +84,32 @@ jobs:
           CLOUD_RUN_URL: ${{ secrets.CLOUD_RUN_URL }}
           ID_TOKEN: ${{ steps.auth.outputs.id_token }}
           FILES_CHANGED: ${{ steps.files.outputs.files }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ACCOUNT_ID: ${{ github.event.pull_request.user.login }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           # diffをJSON形式で準備
           DIFF_CONTENT=$(cat /tmp/diff.txt | jq -Rs .)
+
+          # jqでJSON安全にペイロードを構築
+          PAYLOAD=$(jq -n \
+            --arg platform "github" \
+            --arg owner "$REPO_OWNER" \
+            --arg repo "$REPO_NAME" \
+            --argjson number "$PR_NUMBER" \
+            --arg accountId "$ACCOUNT_ID" \
+            --arg title "$PR_TITLE" \
+            --argjson diff "$DIFF_CONTENT" \
+            --argjson filesChanged "$FILES_CHANGED" \
+            '{platform: $platform, owner: $owner, repo: $repo, number: $number, accountId: $accountId, title: $title, diff: $diff, filesChanged: $filesChanged}')
 
           # IAM認証付きでAPIリクエストを送信
           RESPONSE=$(curl -s -X POST "$CLOUD_RUN_URL/api/quiz/generate" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $ID_TOKEN" \
-            -d "{
-              \"platform\": \"github\",
-              \"owner\": \"${{ github.repository_owner }}\",
-              \"repo\": \"${{ github.event.repository.name }}\",
-              \"number\": ${{ github.event.pull_request.number }},
-              \"accountId\": \"${{ github.event.pull_request.user.login }}\",
-              \"title\": $(echo '${{ github.event.pull_request.title }}' | jq -Rs .),
-              \"diff\": $DIFF_CONTENT,
-              \"filesChanged\": $FILES_CHANGED
-            }")
+            -d "$PAYLOAD")
 
           echo "response=$RESPONSE" >> $GITHUB_OUTPUT
 
@@ -120,14 +133,20 @@ jobs:
       - name: Post quiz as comment
         if: steps.diff.outputs.skip == 'false' && steps.quiz.outputs.quiz_id != '' && steps.quiz.outputs.quiz_id != 'null'
         uses: actions/github-script@v7
+        env:
+          QUIZ_ID: ${{ steps.quiz.outputs.quiz_id }}
+          QUESTION: ${{ steps.quiz.outputs.question }}
+          CATEGORY: ${{ steps.quiz.outputs.category }}
+          DIFFICULTY: ${{ steps.quiz.outputs.difficulty }}
+          OPTIONS: ${{ steps.quiz.outputs.options }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
-            const quizId = '${{ steps.quiz.outputs.quiz_id }}';
-            const question = `${{ steps.quiz.outputs.question }}`;
-            const category = '${{ steps.quiz.outputs.category }}';
-            const difficulty = '${{ steps.quiz.outputs.difficulty }}';
-            const options = `${{ steps.quiz.outputs.options }}`;
+            const quizId = process.env.QUIZ_ID;
+            const question = process.env.QUESTION;
+            const category = process.env.CATEGORY;
+            const difficulty = process.env.DIFFICULTY;
+            const options = process.env.OPTIONS;
 
             const difficultyEmoji = {
               'easy': '🟢',

@@ -24,10 +24,9 @@ jobs:
     steps:
       - name: Check for command
         id: command
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          COMMENT_BODY='${{ github.event.comment.body }}'
-          echo "comment_body=$COMMENT_BODY" >> $GITHUB_OUTPUT
-
           # /answer または /profile コマンドが含まれているか確認
           if echo "$COMMENT_BODY" | grep -qE '^/answer|^/profile'; then
             echo "has_command=true" >> $GITHUB_OUTPUT
@@ -63,22 +62,28 @@ jobs:
         env:
           CLOUD_RUN_URL: ${{ secrets.CLOUD_RUN_URL }}
           ID_TOKEN: ${{ steps.auth.outputs.id_token }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          ACCOUNT_ID: ${{ github.event.comment.user.login }}
+          INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
         run: |
-          # コメント本文をJSON形式で準備
-          COMMENT_BODY=$(echo '${{ github.event.comment.body }}' | jq -Rs .)
+          # jqでJSON安全にペイロードを構築
+          PAYLOAD=$(jq -n \
+            --arg owner "$REPO_OWNER" \
+            --arg repo "$REPO_NAME" \
+            --argjson prNumber "$PR_NUMBER" \
+            --arg accountId "$ACCOUNT_ID" \
+            --arg commentBody "$COMMENT_BODY" \
+            --argjson installationId "$INSTALLATION_ID" \
+            '{owner: $owner, repo: $repo, prNumber: $prNumber, accountId: $accountId, commentBody: $commentBody, installationId: $installationId}')
 
           # IAM認証付きでAPIリクエストを送信
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$CLOUD_RUN_URL/api/comment/process" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $ID_TOKEN" \
-            -d "{
-              \"owner\": \"${{ github.repository_owner }}\",
-              \"repo\": \"${{ github.event.repository.name }}\",
-              \"prNumber\": ${{ github.event.issue.number }},
-              \"accountId\": \"${{ github.event.comment.user.login }}\",
-              \"commentBody\": $COMMENT_BODY,
-              \"installationId\": ${{ steps.app-token.outputs.installation-id }}
-            }")
+            -d "$PAYLOAD")
 
           # レスポンスとステータスコードを分離
           HTTP_BODY=$(echo "$RESPONSE" | head -n -1)
